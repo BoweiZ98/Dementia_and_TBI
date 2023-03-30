@@ -1,0 +1,284 @@
+---
+title: "Diagnosis of Dementia and History of Traumatic Brain Injury (TBI)"
+author: "Bowei Zhang"
+date: "2023-03-30"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tinytex)
+library(tidyverse)
+library(binom)
+library(logistf)
+library(MASS)
+library(car)
+library(generalhoslem)
+```
+
+# Data Wrangling
+## Data Cleaning
+```{r}
+# import data
+donor_raw <- read_csv("../data/DonorInformation.csv")
+donor <- donor_raw %>%
+  dplyr::select(-donor_id, -name, - race, - hispanic)
+
+# Recode
+# recode outcome dsm_iv_clinical_diagnosis
+donor <- donor %>% mutate(dementia = case_when(
+  dsm_iv_clinical_diagnosis == 'No Dementia' ~ 0,
+  TRUE ~ 1,
+)) %>% dplyr::select(-dsm_iv_clinical_diagnosis, - cerad, -control_set, -braak, - nia_reagan)
+
+
+# recode 'age':
+donor <- donor %>% 
+  mutate(age = case_when(
+    age == '100+' ~ '100',
+    age == '95-99' ~ '97',
+    age == '90-94' ~ '92',
+    TRUE ~ age
+    )
+  ) %>% 
+  mutate(age = as.numeric(age))
+
+## Relabel column 'sex'
+donor$sex <- ifelse(donor$sex == 'M', 1, 0)
+donor$sex <- factor(donor$sex,
+                    levels = 0:1,
+                    labels = c('Female', 'Male'))
+
+## relabel column 'apo_e4_allele'
+donor = donor %>% mutate(apo_e4_allele = case_when(
+  apo_e4_allele == 'N' ~ 0,
+  apo_e4_allele == 'Y' ~ 1,
+  apo_e4_allele == 'N/A' ~2
+))
+donor$apo_e4_allele <- factor(donor$apo_e4_allele,
+                              levels = 0:2,
+                              labels = c('not carrier', 'carrier', 'unknown'))
+
+## relabel column 'longest_loc_duration'
+donor = donor %>% mutate(longest_loc_duration = case_when(
+  longest_loc_duration == "Unknown or N/A" ~ 0,
+  longest_loc_duration == "< 10 sec" ~ 1,
+  longest_loc_duration == "10 sec - 1 min" ~ 2,
+  longest_loc_duration == "1-2 min" ~ 3,
+  longest_loc_duration == "3-5 min" ~ 4,
+  longest_loc_duration == "6-9 min" ~ 5,
+  longest_loc_duration == "10 min - 1 hr" ~ 6,
+  longest_loc_duration == "> 1 hr" ~ 7
+))
+donor$longest_loc_duration <- factor(donor$longest_loc_duration,
+                                     levels = 0:7,
+                                     labels = c(
+                                       "Unknown or N/A",
+                                       "< 10 sec",
+                                       "10 sec - 1 min",
+                                       "1-2 min",
+                                       "3-5 min",
+                                       "6-9 min",
+                                       "10 min - 1 hr",
+                                       "> 1 hr"
+                                     ))
+```
+
+# Explanatory Analysis
+## Backward Elimination on confounders: sex, apo_e4, education years, using p = 0.2
+```{r}
+m.confounders <- logistf(data = donor,
+                         formula = dementia ~ sex + apo_e4_allele + education_years,
+                         family = binomial)
+backward(m.confounders, slstay = 0.2)
+```
+```{r}
+## apoe4 and education yr
+m1 <- glm(dementia ~ apo_e4_allele + education_years,
+              data = donor %>% filter(apo_e4_allele != 'unknown'),
+              family = binomial)
+summary(m1)
+```
+## Investigate main effects
+### Age at first TBI
+```{r}
+# create a donor 2 where apo_e4 and age_at_first_tbi are not missing
+donor2 <- donor %>% filter(apo_e4_allele != 'unknown', age_at_first_tbi != 0)
+
+# See the distribution of Age at First TBI
+ggplot(data = donor2, 
+       aes(age_at_first_tbi, fill = as.factor(dementia)))+
+  geom_histogram(position = "identity")+
+  scale_fill_discrete(name = "Dementia") +
+  geom_vline(xintercept = 40, col = "red") +
+  theme_bw() +
+  labs(x = "Age at First TBI",
+       y = "Counts",
+       title = "Distribution of Age at First TBI")
+```
+```{r}
+# split into 3 age group: never, < 40 and >= 40
+donor2 <- donor %>% mutate(age_at_first_tbi = case_when(
+  age_at_first_tbi == 0 ~ 0,
+  age_at_first_tbi < 40 ~ 1,
+  TRUE ~ 2
+)) %>%
+  filter(apo_e4_allele != 'unknown')
+
+donor2$age_at_first_tbi <- factor(donor2$age_at_first_tbi,
+                                  levels = 0:2,
+                                  labels = c("never", "before 40", "after 40"))
+
+m2 <- glm(dementia ~ apo_e4_allele + education_years + age_at_first_tbi,
+              data = donor2,
+              family = binomial)
+summary(m2)
+```
+### Longest Loss of Consciousness Duration
+```{r}
+## Quasi-complete separation problem
+donor2 %>%
+  filter(ever_tbi_w_loc == 'N') %>%
+  dplyr::select(ever_tbi_w_loc, 
+                age_at_first_tbi, 
+                longest_loc_duration, 
+                num_tbi_w_loc) %>%
+  head(n=5)
+```
+```{r}
+## longest_loc_duration
+ggplot(data = donor2, 
+       aes(longest_loc_duration, fill = as.factor(dementia)))+
+  geom_bar(position = "dodge", binwidth = 0.5)+
+  scale_fill_discrete(name = "Dementia") +
+  theme_bw() +
+  labs(x = "Longest LOC Duration",
+       y = "Count",
+       title = "Distribution of Longest LOC Duration")
+```
+```{r}
+# recode longest_loc_duration
+donor3 <- donor2 %>% mutate(longest_loc_duration = case_when(
+  num_tbi_w_loc == 0 & longest_loc_duration == "Unknown or N/A" ~ 0,
+  num_tbi_w_loc != 0 & longest_loc_duration == "Unknown or N/A" ~ 100, # missing values
+  longest_loc_duration == "< 10 sec" ~ 1,
+  longest_loc_duration == "10 sec - 1 min" ~ 1,
+  longest_loc_duration == "1-2 min" ~ 1,
+  longest_loc_duration == "3-5 min" ~ 2,
+  longest_loc_duration == "6-9 min" ~ 2,
+  longest_loc_duration == "10 min - 1 hr" ~ 2,
+  longest_loc_duration == "> 1 hr" ~ 2
+)) %>%
+  filter(longest_loc_duration != 100)
+donor3$longest_loc_duration <- factor(donor3$longest_loc_duration,
+                                      levels = 0:2,
+                                      labels = c("never", "less than 3min", "more than 3min"))
+# See the new distribution
+ggplot(data = donor3, 
+       aes(longest_loc_duration, fill = as.factor(dementia)))+
+  geom_bar(position = "dodge")+
+  scale_fill_discrete(name = "Dementia")+
+  theme_bw() +
+  labs(x = "Longest LOC Duration",
+       y = "Count",
+       title = "Distribution of Longest LOC Duration")
+```
+```{r}
+m3 <- glm(dementia ~  apo_e4_allele + education_years + longest_loc_duration,
+    data = donor3,
+    family = binomial)
+summary(m3)
+```
+### Number of TBI with LOC
+```{r}
+# Distribution of num_tbi_w_loc
+ggplot(data = donor3, 
+       aes(num_tbi_w_loc, fill = as.factor(dementia)))+
+  geom_bar(position = "dodge")+
+  scale_fill_discrete(name = "Dementia") +
+  theme_bw() +
+  labs(x = "Number of TBI with LOC",
+       title = "Distribution of Number of TBI with LOC")
+```
+```{r}
+# maybe we can combine group 2 and 3
+donor4 <- donor3 %>% mutate(num_tbi_w_loc = case_when(
+  num_tbi_w_loc >= 2 ~ 2,
+  num_tbi_w_loc == 1 ~ 1,
+  num_tbi_w_loc == 0 ~ 0,
+))
+donor4$num_tbi_w_loc <- factor(donor4$num_tbi_w_loc,
+                               levels = 0:2,
+                               labels = c('0', '1', '2-3'))
+
+# plot
+#donor4 %>% count(dementia, num_tbi_w_loc)
+ggplot(data = donor4, 
+       aes(num_tbi_w_loc, fill = as.factor(dementia)))+
+  geom_bar(position = "dodge")+
+  scale_fill_discrete(name = "Dementia") +
+  theme_bw() +
+  labs(x = "Number of TBI with LOC",
+       title = "Distribution of Number of TBI with LOC")
+```
+```{r}
+m5 <- glm(dementia ~ apo_e4_allele + education_years +
+                num_tbi_w_loc,
+              data = donor4,
+              family = binomial)
+summary(m5)
+```
+# Model Fitting
+## Interaction terms
+```{r}
+m2.apoe4int <- update(m2, . ~ . + apo_e4_allele:age_at_first_tbi)
+anova(m2, m2.apoe4int, test = "LRT")
+```
+```{r}
+m2.eduyint <- update(m2, . ~ . + education_years:age_at_first_tbi)
+anova(m2, m2.eduyint, test = "LRT")
+```
+```{r}
+# aggregate model
+m.final <- m2
+ag.donor2 <- aggregate(dementia ~ apo_e4_allele + education_years + age_at_first_tbi,
+                       data = donor2,
+                       FUN = sum)
+ag.donor2 <- cbind(ag.donor2,
+                   aggregate(dementia ~ apo_e4_allele + education_years + age_at_first_tbi,
+                       data = donor2,
+                       FUN = length))
+colnames(ag.donor2)[8] = 'tot'
+ag.m.final = glm(dementia/tot ~ apo_e4_allele + education_years + age_at_first_tbi,
+                 data = ag.donor2,
+                 family = binomial)
+summary(ag.m.final)
+
+# Diagnostic Plot
+par(mfrow = c(2,2))
+plot(ag.m.final)
+```
+```{r}
+# checking for influential points
+influencePlot(m.final)
+```
+# Results
+For the purpose of this analysis, it was our interest to find an association between an earlier exposure(s) to TBI and a later development of dementia. After conducting a full analysis of the Aging, Dementia and Traumatic Brain Injury (TBI) Project, originally collected from the ACT study, we fail to reject our null hypothesis. Thus, we conclude that there is not enough statistically significant evidence that suggests there is an association between TBI exposure and the diagnosis of dementia. Though it was not the question of interest, an association between carriers of the APOE4 gene and education years was found to be significant in the development of dementia. Below, Figure 5 shows us the distribution of diagnosis of dementia, education years, and APOE4 gene status in light of age at first TBI. The plot demonstrates that the odds of developing dementia decrease by 12% (95% CI: -23.5%, -0.08%) for every additional year of education, when all other factors are held constant. The odds of developing dementia increase by a factor of 2.99 (95% CI: 1.076, 9.067) for those who are carriers of the APOE4 gene, compared to those who do not carrier the gene, when all other factors are held constant. Figure 5 also illustrates that the odds of developing dementia for those who experienced their first TBI before the age of 40 is increased by 72.3% (95% CI: 0.655, 4.631) compared to those who had never experienced a TBI, when all other factors all held constant. Similarly, the odds of developing dementia for those who experienced their first TBI after the age of 40 is increased by 12.3% (95% CI: 0.383, 3.256) compared to those who had never experienced a TBI, when all other factors all held constant. However, neither exposure to TBI before or after 40 years of age have significant results. Thus, we suggest further testing with a larger sample in order to see if an association between TBI exposure and dementia exists.
+
+```{r}
+pred.m2 <- data.frame(expand.grid(education_years = c(6:21),
+                                  apo_e4_allele = c("carrier", "not carrier"),
+                                  age_at_first_tbi = c("never", "before 40", "after 40")))
+
+ggplot(data = pred.m2, 
+       aes(x = education_years, y = predict(m2, newdata = pred.m2, type = "response"), col = apo_e4_allele)) +
+  facet_wrap(facets =  vars(age_at_first_tbi)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  theme_bw() +
+  labs(x = "Education Years",
+       y = "Predicted Rate of Dementia",
+       title = "The Effect of Age at First TBI on Diagnosis of Dementia")
+```
+
+
